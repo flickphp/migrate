@@ -1,0 +1,408 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+/**
+ * Formr to Flick Migration Tool
+ *
+ * Converts Formr PHP code to Flick, with inline TODO comments
+ * for items requiring manual attention.
+ *
+ * Usage:
+ *   ./vendor/bin/migrate-formr /path/to/file.php           # Single file
+ *   ./vendor/bin/migrate-formr /path/to/directory          # Directory (recursive)
+ *   ./vendor/bin/migrate-formr /path/to/file.php --dry-run # Preview only
+ */
+
+// Find autoloader
+$autoloadPaths = [
+    __DIR__.'/../vendor/autoload.php',       // When run from package
+    __DIR__.'/../../../autoload.php',        // When installed as dependency
+    __DIR__.'/../../../../vendor/autoload.php', // Alternative path
+];
+
+$autoloaderFound = false;
+foreach ($autoloadPaths as $autoloadPath) {
+    if (file_exists($autoloadPath)) {
+        require $autoloadPath;
+        $autoloaderFound = true;
+        break;
+    }
+}
+
+if (! $autoloaderFound) {
+    echo "\033[31mError: Could not find Composer autoloader.\033[0m\n";
+    echo "Please run 'composer install' first.\n";
+    exit(1);
+}
+
+use Flick\Migrate\FormrMigrator;
+
+// ============================================================================
+// CLI Setup
+// ============================================================================
+
+$args = array_slice($argv, 1);
+$dryRun = false;
+$path = null;
+
+foreach ($args as $arg) {
+    if ($arg === '--dry-run' || $arg === '-n') {
+        $dryRun = true;
+    } elseif ($arg === '--help' || $arg === '-h') {
+        showHelp();
+        exit(0);
+    } elseif ($arg === '--version' || $arg === '-v') {
+        try {
+            $version = \Composer\InstalledVersions::getPrettyVersion('flickphp/migrate') ?? 'unknown';
+        } catch (\OutOfBoundsException) {
+            $version = 'unknown';
+        }
+        echo "Formr to Flick Migration Tool {$version}\n";
+        exit(0);
+    } elseif (str_starts_with($arg, '-')) {
+        // Reject unknown options instead of silently ignoring them. A typo like
+        // "--dryrun" must never fall through and trigger a real in-place rewrite.
+        echo "\033[31mError: Unknown option: {$arg}\033[0m\n\n";
+        showHelp();
+        exit(1);
+    } elseif ($path !== null) {
+        // Only one path is supported; reject extra positional arguments rather
+        // than silently keeping the last one.
+        echo "\033[31mError: Multiple paths provided ('{$path}' and '{$arg}'). Please pass a single file or directory.\033[0m\n";
+        exit(1);
+    } else {
+        $path = $arg;
+    }
+}
+
+if (! $path) {
+    echo "\033[31mError: No file or directory path provided.\033[0m\n\n";
+    showHelp();
+    exit(1);
+}
+
+if (! file_exists($path)) {
+    echo "\033[31mError: Path does not exist: {$path}\033[0m\n";
+    exit(1);
+}
+
+function showHelp(): void
+{
+    echo <<<'HELP'
+Formr to Flick Migration Tool
+
+Usage:
+  migrate-formr <path> [options]
+
+Arguments:
+  path              Path to a PHP file or directory to migrate
+
+Options:
+  --dry-run, -n     Preview changes without modifying files
+  --help, -h        Show this help message
+  --version, -v     Show version number
+
+Examples:
+  ./vendor/bin/migrate-formr /path/to/file.php
+  ./vendor/bin/migrate-formr /path/to/directory
+  ./vendor/bin/migrate-formr /path/to/file.php --dry-run
+
+HELP;
+}
+
+function discoverPhpFiles(string $path): array
+{
+    if (is_file($path)) {
+        return [$path];
+    }
+
+    // Directories to never descend into. Rewriting vendor/formr/formr (or any
+    // dependency) would corrupt installed packages, so skip vendor/node_modules
+    // and any hidden (dot) directory such as .git.
+    $excludedDirs = ['vendor', 'node_modules'];
+
+    $directoryIterator = new RecursiveDirectoryIterator($path, RecursiveDirectoryIterator::SKIP_DOTS);
+    $filter = new RecursiveCallbackFilterIterator($directoryIterator, function ($current) use ($excludedDirs) {
+        if ($current->isDir()) {
+            $name = $current->getFilename();
+            if (in_array($name, $excludedDirs, true) || str_starts_with($name, '.')) {
+                return false;
+            }
+        }
+
+        return true;
+    });
+
+    $files = [];
+    $iterator = new RecursiveIteratorIterator($filter);
+
+    foreach ($iterator as $file) {
+        if ($file->isFile() && $file->getExtension() === 'php') {
+            $files[] = $file->getPathname();
+        }
+    }
+
+    return $files;
+}
+
+/**
+ * Build a preview of the changes as a removed block followed by an added
+ * block.
+ *
+ * Lines are paired by trimming the common prefix and the common suffix rather
+ * than by index. Index alignment was wrong the moment the migrator inserted a
+ * line — which it does routinely (the external-instance TODO goes in right
+ * after `<?php`) — because every line below the insertion was then compared
+ * against its neighbour and reported as an unrelated delete/add pair, so
+ * untouched code showed up as an addition (mig-B29).
+ *
+ * Lines are emitted verbatim (no trim(), so an indentation-only change is
+ * visible, and no empty() test, so a line whose content is "0" is not
+ * swallowed). The budget counts SOURCE lines from the head of each block, not
+ * emitted lines, and the marker reports how many changed lines were held back.
+ */
+function generateSimpleDiff(string $old, string $new): array
+{
+    $oldLines = explode("\n", $old);
+    $newLines = explode("\n", $new);
+    $oldCount = count($oldLines);
+    $newCount = count($newLines);
+
+    // Walk in from the top while the lines match.
+    $start = 0;
+    while ($start < $oldCount && $start < $newCount && $oldLines[$start] === $newLines[$start]) {
+        $start++;
+    }
+
+    // Walk in from the bottom while the tails match, never crossing the prefix.
+    $oldEnd = $oldCount - 1;
+    $newEnd = $newCount - 1;
+    while ($oldEnd >= $start && $newEnd >= $start && $oldLines[$oldEnd] === $newLines[$newEnd]) {
+        $oldEnd--;
+        $newEnd--;
+    }
+
+    $removed = array_slice($oldLines, $start, $oldEnd - $start + 1);
+    $added = array_slice($newLines, $start, $newEnd - $start + 1);
+
+    $maxLines = 20;
+    $diff = [];
+
+    foreach (array_slice($removed, 0, $maxLines) as $line) {
+        $diff[] = "\033[31m- ".$line."\033[0m";
+    }
+
+    foreach (array_slice($added, 0, $maxLines) as $line) {
+        $diff[] = "\033[32m+ ".$line."\033[0m";
+    }
+
+    $suppressed = max(0, count($removed) - $maxLines) + max(0, count($added) - $maxLines);
+
+    if ($suppressed > 0) {
+        $noun = $suppressed === 1 ? 'line' : 'lines';
+        $diff[] = "\033[90m... ({$suppressed} more changed {$noun} not shown)\033[0m";
+    }
+
+    return $diff;
+}
+
+// ============================================================================
+// Main Execution
+// ============================================================================
+
+$files = discoverPhpFiles($path);
+$migrator = new FormrMigrator;
+
+$totalStats = [
+    'files_processed' => 0,
+    'namespaces' => 0,
+    'methods' => 0,
+    'validation_rules' => 0,
+    'properties' => 0,
+    'todos' => 0,
+];
+
+// Every discovered file ends in exactly one of these buckets, so the summary
+// can never contradict the errors printed above it. "Nothing was modified" is
+// not the same statement as "no Formr code was found": a file that failed to
+// write, and an already-migrated file that needed no changes, both have Formr
+// code. Read/write failures also drive the exit code so CI can detect a
+// partial run (mig-L1).
+$outcomes = [
+    'skipped' => 0,     // no structural Formr reference
+    'unchanged' => 0,   // has Formr code, migration was a no-op
+    'modified' => 0,    // written to disk (or, in a dry run, would be)
+    'failed' => 0,      // could not be read, backed up, or written
+];
+
+echo "\n\033[1mFormr to Flick Migration Tool\033[0m\n";
+echo str_repeat('=', 40)."\n\n";
+
+if ($dryRun) {
+    echo "\033[33mDry run mode - no files will be modified\033[0m\n\n";
+}
+
+echo 'Scanning '.count($files)." PHP file(s)...\n\n";
+
+foreach ($files as $file) {
+    $migrator->resetStats();
+
+    // Guard against unreadable files: under strict_types a false return would
+    // make str_contains() throw a TypeError. Report and continue instead.
+    $originalContent = @file_get_contents($file);
+    if ($originalContent === false) {
+        $relativePath = str_replace(getcwd().'/', '', $file);
+        echo "\033[31m✗\033[0m Could not read file: {$relativePath}\n";
+        $outcomes['failed']++;
+
+        continue;
+    }
+
+    // Gate on a STRUCTURAL Formr signal (use/new/instanceof/type-hint/FQN),
+    // not a bare "formr" substring. A file that merely mentions formr in a
+    // comment or URL has no form receiver to scope to, so processing it would
+    // fall back to the any-variable rewrite and corrupt unrelated calls like
+    // $session->get('cart', 'default') (mig-C1 / mig-L2).
+    if (! $migrator->hasFormrClassReference($originalContent)) {
+        $outcomes['skipped']++;
+
+        continue;
+    }
+
+    $totalStats['files_processed']++;
+
+    $migratedContent = $migrator->migrate($originalContent);
+    $stats = $migrator->getStats();
+
+    // Check if any changes were made
+    $hasChanges = $migratedContent !== $originalContent;
+
+    if ($hasChanges) {
+        $relativePath = str_replace(getcwd().'/', '', $file);
+
+        // Write first (unless dry-run) so a failed write never reports success.
+        // The migrator overwrites files in place, so back up the original to a
+        // sibling *.bak first — recovery must not depend on the user having git
+        // (mig-M2). If the write fails, remove the just-created backup so no
+        // orphan is left behind.
+        if (! $dryRun) {
+            $backup = $file.'.bak';
+            $backedUp = @copy($file, $backup);
+            if ($backedUp === false) {
+                echo "\033[33m!\033[0m Could not create backup for: {$relativePath} (skipping to avoid unrecoverable overwrite)\n";
+                $outcomes['failed']++;
+
+                continue;
+            }
+
+            if (@file_put_contents($file, $migratedContent) === false) {
+                echo "\033[31m✗\033[0m Could not write file: {$relativePath}\n";
+                @unlink($backup);
+                $outcomes['failed']++;
+
+                continue;
+            }
+
+            echo "\033[90m  (backup: {$relativePath}.bak)\033[0m\n";
+        }
+
+        // Counted here, after the write, so this means "actually written".
+        $outcomes['modified']++;
+        $totalStats['namespaces'] += $stats['namespaces'];
+        $totalStats['methods'] += $stats['methods'];
+        $totalStats['validation_rules'] += $stats['validation_rules'];
+        $totalStats['properties'] += $stats['properties'];
+        $totalStats['todos'] += $stats['todos'];
+
+        echo "\033[32m✓\033[0m {$relativePath}\n";
+
+        if ($stats['namespaces'] > 0) {
+            echo "  - Namespace changes: {$stats['namespaces']}\n";
+        }
+        if ($stats['methods'] > 0) {
+            echo "  - Method renames: {$stats['methods']}\n";
+        }
+        if ($stats['validation_rules'] > 0) {
+            echo "  - Validation rule conversions: {$stats['validation_rules']}\n";
+        }
+        if ($stats['properties'] > 0) {
+            echo "  - Property migrations: {$stats['properties']}\n";
+        }
+        if ($stats['todos'] > 0) {
+            echo "  - TODO comments added: {$stats['todos']}\n";
+        }
+
+        // Show inline TODOs
+        $todos = $migrator->getTodos();
+        if (! empty($todos)) {
+            echo "  \033[33mManual review needed:\033[0m\n";
+            foreach ($todos as $todo) {
+                echo "    - {$todo}\n";
+            }
+        }
+
+        echo "\n";
+
+        if ($dryRun) {
+            // Show diff (the file was not modified above)
+            echo "  \033[36mChanges preview:\033[0m\n";
+            $diff = generateSimpleDiff($originalContent, $migratedContent);
+            foreach ($diff as $line) {
+                echo "  {$line}\n";
+            }
+            echo "\n";
+        }
+    } else {
+        $outcomes['unchanged']++;
+    }
+}
+
+// ============================================================================
+// Summary
+// ============================================================================
+
+echo str_repeat('=', 40)."\n";
+echo "\033[1mMigration Summary\033[0m\n";
+echo str_repeat('=', 40)."\n\n";
+
+// Only claim nothing was found when every discovered file was skipped for
+// having no Formr code at all. A file that failed to write, or one that was
+// already migrated and needed no changes, both contain Formr code.
+$foundFormrCode = $outcomes['modified'] + $outcomes['unchanged'] + $outcomes['failed'] > 0;
+
+if (! $foundFormrCode) {
+    echo "\033[33mNo Formr code found to migrate.\033[0m\n";
+} else {
+    echo "Files processed:          {$totalStats['files_processed']}\n";
+    echo "Files modified:           {$outcomes['modified']}\n";
+    echo "Namespace changes:        {$totalStats['namespaces']}\n";
+    echo "Method renames:           {$totalStats['methods']}\n";
+    echo "Validation conversions:   {$totalStats['validation_rules']}\n";
+    echo "Property migrations:      {$totalStats['properties']}\n";
+    echo "TODO comments added:      {$totalStats['todos']}\n";
+
+    echo "\n";
+
+    if ($totalStats['todos'] > 0) {
+        echo "\033[33mNote: Search for 'TODO: FLICK MIGRATION' in your code for items\n";
+        echo "requiring manual attention.\033[0m\n";
+    }
+
+    if ($dryRun) {
+        echo "\n\033[33mThis was a dry run. Run without --dry-run to apply changes.\033[0m\n";
+    } else {
+        echo "\n\033[32mMigration complete!\033[0m\n";
+    }
+}
+
+if ($outcomes['failed'] > 0) {
+    echo "\n\033[31m{$outcomes['failed']} file(s) could not be read or written. Review the errors above.\033[0m\n";
+}
+
+echo "\n";
+
+// Non-zero exit when any file failed to read/write so CI can detect a bad run
+// (mig-L1).
+exit($outcomes['failed'] > 0 ? 1 : 0);

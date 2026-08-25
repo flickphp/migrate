@@ -1,0 +1,53 @@
+{
+  "name": "flickphp/migrate",
+  "description": "Migration tool for converting Formr to Flick.",
+  "homepage": "https://github.com/flickphp/migrate",
+  "license": "MIT",
+  "type": "library",
+  "keywords": [
+    "flick",
+    "formr",
+    "migration",
+    "php",
+    "form builder",
+    "cli"
+  ],
+  "authors": [
+    {
+      "name": "Tim Gavin",
+      "homepage": "https://github.com/timgavin"
+    }
+  ],
+  "require": {
+    "php": "^8.3",
+    "composer-runtime-api": "^2.0"
+  },
+  "require-dev": {
+    "laravel/pint": "^1.30",
+    "pestphp/pest": "^4.0|^5.0"
+  },
+  "autoload": {
+    "psr-4": {
+      "Flick\\Migrate\\": "src/"
+    }
+  },
+  "autoload-dev": {
+    "psr-4": {
+      "Flick\\Migrate\\Tests\\": "tests/"
+    }
+  },
+  "bin": [
+    "bin/migrate-formr"
+  ],
+  "config": {
+    "allow-plugins": {
+      "pestphp/pest-plugin": true
+    }
+  },
+  "scripts": {
+    "format": "vendor/bin/pint",
+    "test": "./vendor/bin/pest"
+  },
+  "minimum-stability": "dev",
+  "prefer-stable": true
+}

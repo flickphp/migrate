@@ -1,0 +1,242 @@
+# Flick Migrate
+
+> CLI tool to automatically convert Formr code to Flick.
+
+## Installation
+
+```shell
+composer require --dev flickphp/migrate
+```
+
+## CLI Usage
+
+```shell
+# Single file
+./vendor/bin/migrate-formr /path/to/file.php
+
+# Entire directory (recursive)
+./vendor/bin/migrate-formr /path/to/directory
+
+# Preview without modifying
+./vendor/bin/migrate-formr /path/to/file.php --dry-run
+
+# Help
+./vendor/bin/migrate-formr --help
+```
+
+## Options
+
+--dry-run, -n    Preview changes without modifying files
+--help, -h       Show help message
+--version, -v    Show version number
+
+## What Gets Converted
+
+### Namespaces
+
+```text
+use Formr\Formr;     →  use Flick\Flick;
+new Formr();         →  new Flick();
+```
+
+### Constructor
+
+```text
+new Formr('bootstrap')           →  new Flick(['views' => 'bootstrap'])
+new Formr('bulma', 'hush')       →  new Flick(['views' => 'bulma', 'echo' => false])
+```
+
+### Form Methods
+
+```text
+create_form()        →  create()
+form_open()          →  open()
+form_close()         →  close()
+form_open_multipart() → openMultipart()
+```
+
+### Input Methods
+
+```text
+input_text()         →  text()
+input_email()        →  email()
+input_password()     →  password()
+input_checkbox()     →  checkbox()
+input_radio()        →  radio()
+input_select()       →  select()
+input_textarea()     →  textarea()
+input_file()         →  file()
+input_upload()       →  file()
+input_submit()       →  submit()
+```
+
+### Request Methods
+
+```text
+post('field', 'Label', 'rules')  →  request('field', 'rules')
+get('field', 'Label', 'rules')   →  request('field', 'rules')
+validate('...')                   →  request('...')
+fastpost()                        →  request()
+```
+
+### Message Methods
+
+```text
+error_message()      →  errorMessage()
+success_message()    →  successMessage()
+warning_message()    →  warningMessage()
+info_message()       →  infoMessage()
+```
+
+### Error Methods
+
+```text
+in_errors()          →  hasError()
+add_to_errors()      →  addError()
+error()              →  getError()
+errors()             →  getErrors()
+```
+
+### Other Methods
+
+```text
+submit()             →  submitted()
+unset_session()      →  destroySession()
+get_ip_address()     →  getIp()
+```
+
+### Validation Rules
+
+```text
+required|email           →  required, email
+min_length[5]            →  min:5
+max_length[50]           →  max:50
+exact_length[10]         →  exact:10
+valid_email              →  email
+valid_url                →  url
+valid_ip                 →  ip
+greater_than[0]          →  greaterThan:0
+less_than[100]           →  lessThan:100
+alpha_dash               →  alphaDash
+matches[field]           →  matches:field
+```
+
+### Inline Validation Syntax
+
+```php
+$form->request('Name(required|min[2]), Email(valid_email)');
+// Becomes:
+$form->request('Name[required, min:2], Email[email]');
+```
+
+### Dropdown Names
+
+These are dropdown *name* conversions applied inside `select()` arguments and
+`'options' => '...'` values — NOT method-call renames. A bare `$form->state(...)`
+method call is left unchanged.
+
+```text
+state         →  states
+country       →  countries
+months_alpha  →  months
+cc_months     →  months2
+cc_years      →  yearsPlus
+```
+
+### Prebuilt Forms
+
+```text
+$form->create_form('login')         →  $form->create('/login')
+$form->create_form('short_contact') →  $form->create('/shortContact')
+$form->create_form('signup')        →  $form->create('/registration')
+```
+
+## Items Flagged with TODO
+
+The tool adds `// TODO: FLICK MIGRATION` comments for items needing manual attention:
+
+### Pro-Required Features
+
+```text
+send_email()              →  $form->mail->send() (rewritten; needs Pro mail)
+send_html_email()         →  $form->mail->send(..., ['html'=>...]) (rewritten; needs Pro mail)
+recaptcha_*()             →  name kept, flagged with a Pro TODO (convert by hand)
+upload($field)            →  $form->file($field) (core method; use $form->upload->image() for Pro processing)
+```
+
+### Methods with No Direct Equivalent
+
+```text
+button()                  →  Use HTML <button> directly
+input_button()            →  Use HTML <button> directly
+input_image()             →  Use HTML <input type="image"> directly
+input_reset()             →  Use HTML <input type="reset"> directly
+in_errors_if()            →  Use hasError() with conditional logic
+heading()                 →  Use HTML heading tags directly
+messages()                →  Manual handling required
+```
+
+### Properties with No Equivalent
+
+```text
+required = '*'            →  Use CSS to style required fields
+inline_errors             →  Configure in view templates
+custom_validation_messages →  Use per-field messages
+method                    →  Flick handles differently
+charset, doctype, minify  →  Not applicable
+```
+
+## Post-Migration Workflow
+
+1. Run with --dry-run first to preview changes
+2. Run without --dry-run to apply changes
+3. Search for TODO comments: grep -r "TODO: FLICK MIGRATION" /path
+4. Address each TODO manually
+5. Install Flick Pro if needed (for mail, upload, reCAPTCHA)
+6. Test all forms thoroughly
+7. Remove package: composer remove flickphp/migrate
+
+## CLI Output Example
+
+```text
+Formr to Flick Migration Tool
+========================================
+
+Scanning 5 PHP file(s)...
+
+✓ controllers/UserController.php
+  - Namespace changes: 2
+  - Method renames: 15
+  - Validation rule conversions: 8
+  - TODO comments added: 2
+
+========================================
+Migration Summary
+========================================
+
+Files processed:          5
+Files modified:           3
+Namespace changes:        5
+Method renames:           42
+Validation conversions:   24
+Property migrations:      3
+TODO comments added:      6
+
+Migration complete!
+```
+
+## Gotchas
+
+1. Always use --dry-run first - Preview before modifying
+2. Backup your code - Or use version control before running
+3. TODOs require manual work - Not everything can be auto-converted
+4. Pro features need license - Mail, upload, reCAPTCHA require flickphp/pro
+5. Test thoroughly after migration - Automated conversion isn't perfect
+6. Remove when done - This is a dev-only dependency
+7. Custom Formr extensions not handled - Subclasses need manual migration
+8. JavaScript references may need updates - Formr-specific attributes change
+
+## Links
+
+- Documentation: https://flickphp.com
+- GitHub: https://github.com/flickphp/migrate
