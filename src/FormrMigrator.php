@@ -3296,6 +3296,64 @@ class FormrMigrator
     }
 
     /**
+     * Names that can only be Formr's. Used to decide whether a file that
+     * never mentions the class still deserves a manual-migration TODO.
+     *
+     * Deliberately excludes every generic name -- get, post, validate, ok,
+     * submitted, text, select, open, close, textarea, messages, upload, csrf,
+     * info -- because they collide with ordinary application code and the
+     * tool's precision is the thing most worth protecting. Measured across
+     * the validation corpus, this list flags the two files that needed it and
+     * zero files in bsik-core (97 files, 22 unrelated ->get( calls),
+     * smolblog-wordpress or VaccineNotifierSite.
+     *
+     * @var list<string>
+     */
+    private array $distinctiveFormrMethods = [
+        'input_text', 'input_email', 'input_password', 'input_select',
+        'input_checkbox', 'input_number', 'input_hidden', 'input_submit',
+        'input_button_submit', 'checkbox_inline', 'radio_inline',
+        'form_open', 'form_close', 'create_form', 'fastform', 'in_errors',
+        'error_message', 'success_message', 'send_html_email',
+    ];
+
+    /**
+     * Whether the content uses a name that can only be Formr's, on any
+     * receiver shape -- $form->, $this->form->, $obj->prop->.
+     *
+     * A file whose form instance is built elsewhere never names the class, so
+     * hasFormrClassReference() is false and the CLI skipped it outright. That
+     * is right for rewriting -- there is no receiver to scope to -- but wrong
+     * for reporting: whole directories of live Formr calls sat behind a
+     * "Migration complete!".
+     */
+    public function usesDistinctiveFormrApi(string $content): bool
+    {
+        $alts = implode('|', array_map(
+            fn (string $m) => preg_quote($m, '/'),
+            $this->distinctiveFormrMethods
+        ));
+
+        // A call, or a property assignment such as ->error_message = '...'.
+        return preg_match('/->(?:'.$alts.')\s*[(=]/', $content) === 1;
+    }
+
+    /**
+     * Add the external-instance TODO without running a single conversion.
+     *
+     * For a file that uses Formr's API but never names the class: nothing can
+     * be rewritten safely, because there is no receiver to scope to and the
+     * any-variable fallback would corrupt unrelated objects. Saying so is
+     * still far better than silence.
+     */
+    public function flagExternalUsageOnly(string $content): string
+    {
+        $this->todos = [];
+
+        return $this->flagExternalInstanceUsage($content, new Receivers([], true));
+    }
+
+    /**
      * Whether the content contains method calls or property assignments that
      * look like Formr usage (names drawn from the migration tables). Used to
      * decide if an external-instance file deserves a manual-migration TODO.
@@ -3311,7 +3369,9 @@ class FormrMigrator
         );
         $methodAlts = implode('|', array_map(fn ($m) => preg_quote($m, '/'), $methods));
 
-        if (preg_match('/\$\w+->(?:'.$methodAlts.')\s*\(/', $content) === 1) {
+        // One property hop is allowed: a form held in a property reads as
+        // $this->form->post(...), which a bare \$\w+-> anchor never matched.
+        if (preg_match('/\$\w+(?:->\w+)?->(?:'.$methodAlts.')\s*\(/', $content) === 1) {
             return true;
         }
 
@@ -3324,7 +3384,7 @@ class FormrMigrator
         );
         $propertyAlts = implode('|', array_map(fn ($p) => preg_quote($p, '/'), $properties));
 
-        return preg_match('/\$\w+->(?:'.$propertyAlts.')\s*=[^=]/', $content) === 1;
+        return preg_match('/\$\w+(?:->\w+)?->(?:'.$propertyAlts.')\s*=[^=]/', $content) === 1;
     }
 
     /**

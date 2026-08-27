@@ -265,10 +265,21 @@ foreach ($files as $file) {
     // comment or URL has no form receiver to scope to, so processing it would
     // fall back to the any-variable rewrite and corrupt unrelated calls like
     // $session->get('cart', 'default') (mig-C1 / mig-L2).
-    if (! $migrator->hasFormrClassReference($originalContent)) {
-        $outcomes['skipped']++;
+    $flagOnly = false;
 
-        continue;
+    if (! $migrator->hasFormrClassReference($originalContent)) {
+        // The class is never named here, so there is no receiver to scope a
+        // rewrite to and nothing can be converted safely. But a file calling
+        // input_submit() is still Formr code whose instance was built in
+        // another file, and skipping it in silence is how a 361-file repo
+        // reported "Migration complete!" over 31 live Formr calls. Flag it.
+        if (! $migrator->usesDistinctiveFormrApi($originalContent)) {
+            $outcomes['skipped']++;
+
+            continue;
+        }
+
+        $flagOnly = true;
     }
 
     // A file that DEFINES the class is Formr itself, vendored by hand outside
@@ -284,7 +295,9 @@ foreach ($files as $file) {
 
     $totalStats['files_processed']++;
 
-    $migratedContent = $migrator->migrate($originalContent);
+    $migratedContent = $flagOnly
+        ? $migrator->flagExternalUsageOnly($originalContent)
+        : $migrator->migrate($originalContent);
     $stats = $migrator->getStats();
 
     // Check if any changes were made
