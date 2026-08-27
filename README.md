@@ -59,7 +59,7 @@ By default the tool rewrites files **in place**, writing a sibling `*.bak` next 
 | Formr | Flick |
 |-------|-------|
 | `create_form()` | `create()` |
-| `form_open()` | `open()` |
+| `form_open()` | `open()` (arguments reordered, see below) |
 | `form_close()` | `close()` |
 | `input_text()` | `text()` |
 | `input_email()` | `email()` |
@@ -104,6 +104,40 @@ plus a TODO about the lost name.
 
 `submit_button($value)` already leads with the text, so it converts straight
 across.
+
+**Opening tags move their arguments too.** Both libraries have an `open()`, and
+their signatures do not line up — Formr's `form_open($name, $id, $action,
+$method, $string, $hidden)` against Flick's `open($action, $method,
+$attributes)`. The tool moves the action into first place:
+
+```php
+$form->form_open('myform', 'myform', '/save', 'POST', 'class="row"');
+// becomes
+$form->open('/save', 'POST', 'class="row"');
+```
+
+`$name` and `$id` have nowhere to go — Flick takes the form id from constructor
+config — so a non-default one is flagged with a TODO rather than dropped.
+
+`form_open()` is Formr-only, so it is reshaped whatever its argument count. A
+bare `open()` is only reshaped at four arguments or more, because Flick's own
+three-argument shape is already correct and guessing either way would break a
+working form.
+
+**Selects and fields keep their extra arguments.** Formr's field methods carry
+up to nine positional arguments where Flick's take four, so the surplus is
+folded into Flick's attributes array rather than passed along, where PHP would
+discard it without a word:
+
+```php
+$form->input_select('vt', 'Vaccine', '', '', '', '', $chosen, $options);
+// becomes
+$form->select('vt', 'Vaccine', $chosen, ['options' => $options]);
+
+$form->input_email('email', 'Email', $user->email, '', 'disabled');
+// becomes
+$form->email('email', 'Email', $user->email, ['disabled' => true]);
+```
 
 ### Validation Rules
 
@@ -460,6 +494,34 @@ The migration tool cannot automatically handle:
 - Database queries that store Formr-specific data formats
 
 These require manual review and migration.
+
+**Field labels are dropped from validation calls.** Formr's
+`post($name, $label, $rules)` used `$label` in its error messages; Flick's
+`request()` has no label concept, so messages fall back to the raw field name:
+
+```
+Formr:  "Email Confirmation does not match email"
+Flick:  "confirm_email must be the same as email"
+```
+
+The values still validate correctly — only the wording changes. To restore it,
+pass your own text through `request()`'s third argument:
+
+```php
+$form->request('confirm_email', 'matches:email', [
+    'confirm_email' => ['matches' => 'Email Confirmation does not match Email'],
+]);
+```
+
+**A form built in one file and used in another is flagged, not converted.**
+There is no reliable way to tell which variable holds the form in a file that
+never names the class, and guessing would rewrite unrelated objects. Such files
+get a `TODO: FLICK MIGRATION` comment at the top and are otherwise left exactly
+as they were. Search for that marker after a run.
+
+**Formr vendored outside `vendor/` is skipped entirely.** A hand-copied `formr/`
+directory beside your application code is Formr's own source, not yours, so
+nothing in it is rewritten or annotated.
 
 ---
 

@@ -703,7 +703,8 @@ class FormrMigrator
                     }
 
                     $note = 'open() '.implode(' and ', $lost)
-                        .' has no Flick equivalent: the form id comes from constructor config';
+                        .(count($lost) > 1 ? ' have' : ' has')
+                        .' no Flick equivalent: the form id comes from constructor config';
                     $this->todos[] = $note;
 
                     return '/* TODO: FLICK MIGRATION - '.$note.' */ '.$call;
