@@ -261,6 +261,14 @@ class FormrMigrator
     // Collected file field names for upload migration
     private array $fileFields = [];
 
+    /**
+     * Properties whose assignment this run commented out. A read of one of
+     * them throws through Flick's __get, so the read sites are flagged too.
+     *
+     * @var list<string>
+     */
+    private array $commentedProperties = [];
+
     // Properties with no equivalent
     private array $noEquivalentProperties = [
         'charset',
@@ -352,6 +360,7 @@ class FormrMigrator
         $this->todos = [];
         $this->fileFields = [];
         $this->mailReceivers = [];
+        $this->commentedProperties = [];
 
         // Resolve the receivers ONCE, from the untouched input, and hand the
         // same value to every receiver-scoped pass. Re-deriving them per pass
@@ -2659,12 +2668,18 @@ class FormrMigrator
         // Flag properties with no equivalent - comment out the entire line
         foreach ($propsNoEquivalent as $item) {
             $prop = $item['prop'];
-            [$content] = $this->commentOutPropertyAssignment(
+            [$content, $replaced] = $this->commentOutPropertyAssignment(
                 $content,
                 preg_quote($item['var'], '/'),
                 $prop,
                 "'{$prop}' has no direct Flick equivalent"
             );
+            // Remember what was actually commented out: a read of one of
+            // these now throws through Flick's __get, so the read sites need
+            // flagging too (see migrateNoEquivalentPropertyReads).
+            if ($replaced) {
+                $this->commentedProperties[] = $prop;
+            }
             $this->todos[] = "'{$prop}' has no direct Flick equivalent";
         }
 
@@ -3065,6 +3080,45 @@ class FormrMigrator
                 },
                 $content
             );
+        }
+
+        // Pattern 3: a read anywhere else -- inside a concatenation, an
+        // argument, a comparison. The two patterns above only match a whole
+        // inline-echo statement, so `echo "<p>".$form->success_message."</p>";`
+        // slipped through with its assignment commented out just above it,
+        // and the read then threw at runtime through Flick's __get.
+        //
+        // Scoped to properties this run actually commented out, so a property
+        // the file never assigned is never mentioned. The expression is left
+        // intact and only a marker is prepended, so the file still parses and
+        // the developer can see exactly what to replace.
+        if ($this->commentedProperties !== []) {
+            $alts = implode('|', array_map(
+                fn (string $p) => preg_quote($p, '/'),
+                array_unique($this->commentedProperties)
+            ));
+
+            // Not followed by a single '=' (an assignment, already commented
+            // out); '==' and friends are reads and do count.
+            $readPattern = '/('.$recv.')->('.$alts.')\b(?!\s*=[^=])/';
+
+            if (preg_match_all($readPattern, $content, $matches, PREG_OFFSET_CAPTURE | PREG_SET_ORDER)) {
+                foreach (array_reverse($matches) as $m) {
+                    $at = $m[0][1];
+                    $prop = $m[2][0];
+
+                    if ($this->isAlreadyMigrated($content, $at)) {
+                        continue;
+                    }
+
+                    $this->todos[] = "'{$prop}' is read here but its assignment has no Flick equivalent";
+
+                    $marker = '/* TODO: FLICK MIGRATION - '.$prop
+                        .' has no Flick equivalent; its assignment was commented out and this read will throw */ ';
+
+                    $content = substr($content, 0, $at).$marker.substr($content, $at);
+                }
+            }
         }
 
         return $content;
