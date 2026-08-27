@@ -1408,12 +1408,18 @@ class FormrMigrator
 
     private function migrateConstructor(string $content): string
     {
-        // Match: new Formr('bootstrap') or new Formr('bulma', 'hush')
-        $pattern = '/new\s+(?:Formr\\\\)?Formr\s*\(\s*[\'"](\w+)[\'"]\s*(?:,\s*[\'"](\w+)[\'"])?\s*\)/';
+        // Match: new Formr('bootstrap') or new Formr('bulma', 'hush'), under
+        // any of the four spellings -- bare, Formr\Formr, and either with a
+        // leading backslash. The fully qualified \Formr\Formr form used to
+        // miss every pattern here and fall through to the namespace rename,
+        // which swapped the class but left Formr's positional arguments in
+        // place, silently swallowing 'hush' and re-enabling echo mode.
+        $pattern = '/new\s+(\\\\?(?:Formr\\\\)?)Formr\s*\(\s*[\'"](\w+)[\'"]\s*(?:,\s*[\'"](\w+)[\'"])?\s*\)/';
 
         $content = preg_replace_callback($pattern, function ($matches) {
-            $wrapper = $matches[1];
-            $switch = $matches[2] ?? null;
+            $class = $this->flickClassName($matches[1]);
+            $wrapper = $matches[2];
+            $switch = $matches[3] ?? null;
 
             $config = ["'views' => '{$wrapper}'"];
 
@@ -1427,23 +1433,44 @@ class FormrMigrator
             $configStr = implode(', ', $config);
             $this->stats['namespaces']++;
 
-            return "new Flick([{$configStr}])";
+            return "new {$class}([{$configStr}])";
         }, $content);
 
         // Simple new Formr() without arguments
-        $content = preg_replace('/new\s+(?:Formr\\\\)?Formr\s*\(\s*\)/', 'new Flick()', $content);
+        $content = preg_replace_callback(
+            '/new\s+(\\\\?(?:Formr\\\\)?)Formr\s*\(\s*\)/',
+            fn ($matches) => 'new '.$this->flickClassName($matches[1]).'()',
+            $content
+        );
 
         // Fallback: new Formr($var) / new Formr(EXPR) with non-literal args.
         // Rename to new Flick(...) with a TODO since the argument no longer
         // maps directly (Flick takes an array config). Without this the bare
         // "new Formr(" survives and fatals with "Class Formr not found".
-        $content = preg_replace_callback('/new\s+(?:Formr\\\\)?Formr\s*\(\s*([^)]+?)\s*\)/', function ($matches) {
+        $content = preg_replace_callback('/new\s+(\\\\?(?:Formr\\\\)?)Formr\s*\(\s*([^)]+?)\s*\)/', function ($matches) {
             $this->stats['namespaces']++;
 
-            return '/* TODO: FLICK MIGRATION - review constructor argument(s) */ new Flick('.$matches[1].')';
+            return '/* TODO: FLICK MIGRATION - review constructor argument(s) */ new '
+                .$this->flickClassName($matches[1]).'('.$matches[2].')';
         }, $content);
 
         return $content;
+    }
+
+    /**
+     * The class name to emit for a constructor, given the prefix matched in
+     * the source.
+     *
+     * A source that spelled the class qualified (`Formr\Formr` or
+     * `\Formr\Formr`) may sit in a file with no `use` statement and no
+     * namespace, where an unqualified `new Flick()` resolves to a global
+     * `\Flick` that does not exist -- "Class \"Flick\" not found" at the first
+     * line that builds a form. A fully qualified name is correct whether or
+     * not an import is present, so qualified in means qualified out.
+     */
+    private function flickClassName(string $matchedPrefix): string
+    {
+        return str_contains($matchedPrefix, 'Formr\\') ? '\\Flick\\Flick' : 'Flick';
     }
 
     // Methods that should be commented out entirely (not just flagged)

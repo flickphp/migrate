@@ -14,11 +14,17 @@ describe('namespace migration', function () {
         expect($output)->toContain('use Flick\Flick;');
     });
 
+    // A qualified source stays qualified. This used to assert the unqualified
+    // 'new Flick()', which is only correct when the file also carries a
+    // `use Flick\Flick;` -- and a file that spelled the class qualified
+    // typically does not. In the global namespace that output resolves to a
+    // global \Flick and fatals with 'Class "Flick" not found' at the first
+    // line that builds a form. See ConstructorQualificationTest.
     test('converts fully qualified class name', function () {
         $input = '<?php $form = new Formr\Formr();';
         $output = $this->migrator->migrate($input);
 
-        expect($output)->toContain('new Flick()');
+        expect($output)->toContain('new \Flick\Flick()');
     });
 });
 
