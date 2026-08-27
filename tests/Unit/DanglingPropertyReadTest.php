@@ -112,3 +112,33 @@ PHP;
 
     expect(lintPhp($output))->toBe(0);
 });
+
+test('a multi-line property value is commented out in full', function () {
+    // propertyValuePattern() spans newlines up to the closing semicolon, so a
+    // match expression or multi-line array is captured whole. Prefixing a
+    // single // left every continuation line live and the file stopped
+    // parsing -- hit on oddevan/smolblog-wordpress once $this->form became a
+    // recognised receiver.
+    $input = <<<'PHP_SRC'
+<?php
+use Formr\Formr;
+
+class Page
+{
+    private Formr $form;
+
+    public function run(Exception $e)
+    {
+        $this->form->error_message = match (get_class($e)) {
+            RuntimeException::class => 'boom',
+            default => $e->getMessage(),
+        };
+    }
+}
+PHP_SRC;
+    $output = $this->migrator->migrate($input);
+
+    expect(lintPhp($output))->toBe(0)
+        ->and($output)->toContain('// $this->form->error_message = match')
+        ->and($output)->toContain('// default => $e->getMessage(),');
+});

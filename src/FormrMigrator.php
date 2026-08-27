@@ -2644,16 +2644,61 @@ class FormrMigrator
         // Try line-start pattern first - capture the entire assignment line
         $linePattern = '/^(\s*)('.$varPattern.'->'.preg_quote($prop, '/').'\s*=\s*'.$this->propertyValuePattern().';)/m';
         if (preg_match($linePattern, $content)) {
-            return [preg_replace($linePattern, '$1// '.$todoMsg."\n".'$1// $2', $content, 1), true];
+            $out = preg_replace_callback(
+                $linePattern,
+                fn (array $m): string => $m[1].'// '.$todoMsg."\n".$m[1].'// '.$this->commentEveryLine($m[2]),
+                $content,
+                1
+            );
+
+            return [$out, true];
         }
 
         // Inline pattern (e.g., after <?php on same line)
         $inlinePattern = '/('.$varPattern.'->'.preg_quote($prop, '/').'\s*=\s*'.$this->propertyValuePattern().';)/';
         if (preg_match($inlinePattern, $content)) {
-            return [preg_replace($inlinePattern, '/* '.$todoMsg.' */ // $1', $content, 1), true];
+            $out = preg_replace_callback(
+                $inlinePattern,
+                fn (array $m): string => '/* '.$todoMsg.' */ // '.$this->commentEveryLine($m[1]),
+                $content,
+                1
+            );
+
+            return [$out, true];
         }
 
         return [$content, false];
+    }
+
+    /**
+     * Prefix `//` to every line of a statement, not just the first.
+     *
+     * propertyValuePattern() deliberately spans newlines -- it matches
+     * anything up to the closing semicolon -- so an assignment whose value is
+     * a match expression or a multi-line array is captured whole. Commenting
+     * that out by prepending a single `//` left every continuation line live
+     * and the file stopped parsing:
+     *
+     *   // $this->form->error_message = match (get_class($e)) {
+     *         CommandNotAuthorized::class => 'You are not authorized.',
+     *     };
+     *
+     * Existing indentation is preserved by inserting after the leading
+     * whitespace rather than in front of it.
+     */
+    private function commentEveryLine(string $statement): string
+    {
+        $lines = explode("\n", $statement);
+
+        foreach ($lines as $index => $line) {
+            if ($index === 0) {
+                continue; // caller has already placed the marker on line one
+            }
+
+            $lines[$index] = preg_replace('/^(\s*)/', '$1// ', $line);
+        }
+
+        return implode("\n", $lines);
     }
 
     private function migrateProperties(string $content, Receivers $receivers): string
@@ -3245,10 +3290,22 @@ class FormrMigrator
         // Type-hinted parameters (and docblock @param lines) also identify
         // receivers: multi-file apps construct the instance elsewhere and
         // inject it, e.g. `function render(Formr $form)`.
-        $hintPattern = '/\\\\?(?:Formr\\\\Formr|Flick\\\\Flick|Formr|Flick)\s+(\$\w+)/';
-        if (preg_match_all($hintPattern, $content, $matches)) {
-            foreach ($matches[1] as $var) {
-                $vars[$var] = true;
+        //
+        // A hint carrying a visibility modifier declares a PROPERTY, whether
+        // promoted in a constructor or declared on the class, so the receiver
+        // is $this->name rather than $name. Reading `private Formr $form` as
+        // the receiver `$form` produced a name that appears nowhere in the
+        // file: `external` stayed false, every scoped pass matched nothing,
+        // and the type hint migrated anyway -- leaving Formr calls on an
+        // object that is now a Flick.
+        $hintPattern = '/((?:private|protected|public|readonly)\s+(?:readonly\s+)?)?'
+            .'\\\\?(?:Formr\\\\Formr|Flick\\\\Flick|Formr|Flick)\s+\$(\w+)/';
+        if (preg_match_all($hintPattern, $content, $matches, PREG_SET_ORDER)) {
+            foreach ($matches as $match) {
+                $modifier = trim($match[1] ?? '');
+                $name = $match[2];
+
+                $vars[$modifier === '' ? '$'.$name : '$this->'.$name] = true;
             }
         }
 
@@ -3683,6 +3740,22 @@ class FormrMigrator
             while ($i >= 0 && (ctype_alnum($content[$i]) || $content[$i] === '_')) {
                 $i--;
             }
+
+            // A form held in a property reads as $this->form->method().
+            // Having scanned back over "form" we are sitting on ">", so take
+            // one more hop: "->", a second identifier, then "$". Exactly one
+            // hop, so $a->b->c->method() still lands on ">" again and is
+            // rejected rather than guessed at.
+            if ($i >= 1 && $content[$i] === '>' && $content[$i - 1] === '-') {
+                $beforeArrow = $i - 2;
+                while ($beforeArrow >= 0 && (ctype_alnum($content[$beforeArrow]) || $content[$beforeArrow] === '_')) {
+                    $beforeArrow--;
+                }
+                if ($beforeArrow >= 0 && $content[$beforeArrow] === '$') {
+                    $i = $beforeArrow;
+                }
+            }
+
             if ($i < 0 || $content[$i] !== '$') {
                 $result .= substr($content, $offset, $callEnd - $offset);
                 $offset = $callEnd;
