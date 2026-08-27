@@ -820,6 +820,97 @@ class FormrMigrator
      * this, text('u','U','','user-id','class="x"') reached Flick with the id
      * in the attributes slot and the real attribute string silently ignored.
      */
+    /**
+     * The text-family counterpart to foldCheckboxRadioNonLiteral(): fold the
+     * calls the literal patterns could not, i.e. those with at least one
+     * non-literal argument.
+     *
+     * Real code puts an expression in the value slot --
+     * input_email('email', 'Email', $user->email, '', 'disabled') -- which
+     * matched none of the literal patterns and fell through to the plain
+     * rename. Flick then received a five-argument call, and PHP discards the
+     * surplus on a userland method without a word, so the field rendered
+     * quietly not disabled.
+     *
+     * Formr's inline/help argument (6th) is dropped, matching the literal
+     * path. An attribute string that is itself an expression cannot be parsed
+     * into pairs, so that call is flagged rather than guessed at.
+     */
+    private function foldTextInputNonLiteral(string $content, string $recv, string $method): string
+    {
+        if (! preg_match_all('/('.$recv.')->'.$method.'\s*\(/', $content, $m, PREG_OFFSET_CAPTURE)) {
+            return $content;
+        }
+
+        $isLiteral = fn (string $s): bool => preg_match('/^([\'"]).*\1$/s', $s) === 1;
+
+        for ($i = count($m[0]) - 1; $i >= 0; $i--) {
+            [$match, $at] = $m[0][$i];
+            $var = $m[1][$i][0];
+
+            if ($this->isAlreadyMigrated($content, $at)) {
+                continue;
+            }
+
+            $open = $at + strlen($match) - 1;
+            $close = $this->findMatchingParen($content, $open);
+            if ($close === -1) {
+                continue;
+            }
+
+            $args = array_map('trim', $this->splitTopLevelArgs(substr($content, $open + 1, $close - $open - 1)));
+            if (count($args) < 4 || count($args) > 6) {
+                continue; // Flick-shaped already (<= 3) or not a Formr signature.
+            }
+            if (str_starts_with($args[3], '[')) {
+                continue; // 4th argument is already a Flick attributes array.
+            }
+
+            $name = $args[0];
+            $idArg = $args[3];
+            $attrsArg = $args[4] ?? "''";
+
+            $parts = [];
+            $foldable = true;
+
+            if ($isLiteral($idArg)) {
+                $id = substr($idArg, 1, -1);
+                $fieldName = $isLiteral($name) ? substr($name, 1, -1) : null;
+                $fieldNameBase = $fieldName === null ? null : rtrim($fieldName, '[]');
+                if ($id !== '' && $id !== $fieldName && $id !== $fieldNameBase) {
+                    $parts[] = "'id' => '".str_replace("'", "\\'", $id)."'";
+                }
+            } else {
+                $parts[] = "'id' => {$idArg}";
+            }
+
+            if ($isLiteral($attrsArg)) {
+                foreach ($this->parseFormrAttributes(substr($attrsArg, 1, -1)) as $key => $attrValue) {
+                    $parts[] = $attrValue === true
+                        ? "'{$key}' => true"
+                        : "'{$key}' => '".str_replace("'", "\\'", $attrValue)."'";
+                }
+            } else {
+                $foldable = false;
+            }
+
+            if (! $foldable) {
+                $this->todos[] = "fold Formr's id/attributes arguments into {$method}()'s 4th array argument manually";
+                $todo = "/* TODO: FLICK MIGRATION - fold Formr's id/attributes arguments into {$method}()'s 4th array argument manually */ ";
+                $content = substr($content, 0, $at).$todo.substr($content, $at);
+
+                continue;
+            }
+
+            $this->stats['methods']++;
+            $call = "{$var}->{$method}({$args[0]}, {$args[1]}, {$args[2]}"
+                .($parts === [] ? '' : ', ['.implode(', ', $parts).']').')';
+            $content = substr($content, 0, $at).$call.substr($content, $close + 1);
+        }
+
+        return $content;
+    }
+
     private function migrateTextInputMethods(string $content, Receivers $receivers): string
     {
         $recv = $receivers->pattern();
@@ -847,6 +938,13 @@ class FormrMigrator
                 fn ($m) => $this->buildFoldedFieldCall($m[1], $method, $m[2], $m[3], $m[4], substr($m[5], 1, -1), '', ''),
                 $content
             );
+
+            // Mixed literal/non-literal calls fall through every pattern
+            // above -- real code puts an expression in the value slot -- and
+            // used to keep the Formr argument list, so PHP silently dropped
+            // the attribute string at runtime. Same treatment the
+            // checkbox/radio family already gets.
+            $content = $this->foldTextInputNonLiteral($content, $recv, $method);
         }
 
         return $content;
