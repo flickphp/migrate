@@ -3158,6 +3158,25 @@ class FormrMigrator
     }
 
     /**
+     * Whether this file DEFINES the Formr class rather than consuming it --
+     * that is, it is the library itself rather than a caller of it.
+     *
+     * A copy vendored by hand outside vendor/ was otherwise migrated like any
+     * other file: `namespace Formr;` became `namespace Flick;` and
+     * `class Formr` became `class Flick`, which destroys the library and
+     * produces a second Flick\Flick colliding with the real package. The
+     * CLI's walk already skips vendor/, so this covers the non-standard
+     * vendoring where a formr/ directory sits beside the application code.
+     *
+     * Word-boundaried, so FormrHelper, FormrException and FormrMigrator do
+     * not match.
+     */
+    public function definesFormrClass(string $content): bool
+    {
+        return preg_match('/^\s*(?:final\s+|abstract\s+)?class\s+Formr\b/m', $content) === 1;
+    }
+
+    /**
      * Whether the content contains method calls or property assignments that
      * look like Formr usage (names drawn from the migration tables). Used to
      * decide if an external-instance file deserves a manual-migration TODO.

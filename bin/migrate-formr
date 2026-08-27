@@ -271,6 +271,17 @@ foreach ($files as $file) {
         continue;
     }
 
+    // A file that DEFINES the class is Formr itself, vendored by hand outside
+    // vendor/ (which the walk already skips). Migrating it rewrites
+    // `namespace Formr` to `namespace Flick` and `class Formr` to
+    // `class Flick`, destroying the library and colliding with the real
+    // package.
+    if ($migrator->definesFormrClass($originalContent)) {
+        $outcomes['skipped']++;
+
+        continue;
+    }
+
     $totalStats['files_processed']++;
 
     $migratedContent = $migrator->migrate($originalContent);
