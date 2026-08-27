@@ -375,6 +375,11 @@ class FormrMigrator
         $content = $this->migrateNamespaces($content);
         $content = $this->migrateFormrArrays($content);
         $content = $this->migrateRequestMethods($content, $receivers);
+        // Submission checks convert BEFORE any button is renamed to submit():
+        // afterwards every `->submit(` in the file is ambiguous between the
+        // check and a button the migrator itself just created, and the
+        // return-context conversion turned such a button into a check.
+        $content = $this->migrateSubmittedChecks($content, $receivers);
         // Submit buttons must run BEFORE migrateMethods: the map renames
         // input_submit -> submit without touching the arguments, and the two
         // signatures put the button text in different slots.
@@ -504,6 +509,113 @@ class FormrMigrator
      *
      * The 4th argument in Flick is an array that can contain 'id' and 'checked'.
      */
+    /**
+     * Convert Formr's submission check to Flick's submitted().
+     *
+     * Runs BEFORE migrateSubmitMethods(), so every `->submit(` it sees came
+     * from the source, where it can only be the submission check: Formr
+     * spells buttons input_submit/submit_button. This block used to live in
+     * migrateMethods(), which runs after those buttons have already been
+     * renamed to submit() -- so the return-context regex below matched a
+     * button the migrator had just created, and
+     *
+     *   return $form->input_submit('submit', '', 'Send');
+     *
+     * silently became `return $form->submitted('Send');`, a check where a
+     * button belonged. submit_button escaped only because the method map is
+     * applied later still. The comment here always claimed the premise that
+     * the ordering violated; running first restores it.
+     *
+     * Formr's optional form-id argument is preserved -- Flick ignores it (the
+     * id comes from constructor config) but it documents intent. A leftover
+     * submit() renders a button in Flick and is always truthy, so every
+     * value-consuming context must be converted, not just `if (...)`.
+     *
+     * Whatever is left after those conversions is a check in a context they
+     * do not cover -- an assignment or a bare statement. Renaming it would be
+     * wrong and dropping it silently is worse, so it is flagged.
+     */
+    private function migrateSubmittedChecks(string $content, Receivers $receivers): string
+    {
+        $recv = $receivers->pattern();
+
+        // if/elseif/while ( ... $form->submit([$id]) ... )
+        $content = preg_replace(
+            '/\b(if|elseif|while)(\s*\(\s*)('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)/',
+            '$1$2$3->submitted($4)',
+            $content
+        );
+        // negation: !$form->submit([$id])
+        $content = preg_replace(
+            '/(!\s*)('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)/',
+            '$1$2->submitted($3)',
+            $content
+        );
+        // boolean operator on the right: $form->submit([$id]) && / ||
+        $content = preg_replace(
+            '/('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)(\s*(?:&&|\|\|))/',
+            '$1->submitted($2)$3',
+            $content
+        );
+        // boolean operator on the left: && / || $form->submit([$id])
+        $content = preg_replace(
+            '/((?:&&|\|\|)\s*)('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)/',
+            '$1$2->submitted($3)',
+            $content
+        );
+        // ternary condition: $form->submit([$id]) ? ... (also short ternary),
+        // but not a PHP close tag or null coalescing
+        $content = preg_replace(
+            '/('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)(\s*\?(?![>?]))/',
+            '$1->submitted($2)$3',
+            $content
+        );
+        // return statement: return $form->submit([$id]);
+        $content = preg_replace(
+            '/(\breturn\s+)('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)/',
+            '$1$2->submitted($3)',
+            $content
+        );
+
+        // Anything still spelled ->submit( on a receiver is the source's own
+        // submission check in a context the conversions above do not cover.
+        return $this->flagLeftoverSubmit($content, $recv);
+    }
+
+    /**
+     * Flag a Formr submission check that no conversion context matched --
+     * an assignment (`$posted = $form->submit();`) or a bare statement.
+     *
+     * Flick's submit() renders a button and is always truthy, so leaving
+     * these silent means an assignment captures markup instead of a boolean
+     * and a bare statement echoes a button into the page.
+     */
+    private function flagLeftoverSubmit(string $content, string $recv): string
+    {
+        $marker = 'use submitted() if you meant the check';
+
+        if (! preg_match_all('/('.$recv.')->submit\s*\(/', $content, $m, PREG_OFFSET_CAPTURE)) {
+            return $content;
+        }
+
+        for ($i = count($m[0]) - 1; $i >= 0; $i--) {
+            $at = $m[0][$i][1];
+
+            if ($this->isAlreadyMigrated($content, $at)) {
+                continue;
+            }
+
+            $this->todos[] = 'submit() outside a condition renders a button in Flick; '.$marker;
+
+            $todo = '/* TODO: FLICK MIGRATION - Formr submit() reports whether the form was posted; '
+                ."Flick's submit() renders a button and is always truthy. ".ucfirst($marker).' */ ';
+
+            $content = substr($content, 0, $at).$todo.substr($content, $at);
+        }
+
+        return $content;
+    }
+
     /**
      * Reshape Formr's opening form tag into Flick's.
      *
@@ -1768,53 +1880,6 @@ class FormrMigrator
         foreach ($this->noEquivalentMethods as $method => $note) {
             $content = $this->flagMethodWithTodo($content, $recv, $method, "'{$method}': {$note}");
         }
-
-        // Handle submit() vs submitted() BEFORE the method renames below:
-        // in original Formr code every `->submit(` is the submission check
-        // (buttons are input_submit/submit_button, not yet renamed), so
-        // converting here can never touch a button. Formr's optional form-id
-        // argument is preserved — Flick ignores it (the id comes from
-        // constructor config) but it documents intent. A leftover submit()
-        // renders a button in Flick and is always truthy, so every
-        // value-consuming context must be converted, not just `if (...)`.
-
-        // if/elseif/while ( ... $form->submit([$id]) ... )
-        $content = preg_replace(
-            '/\b(if|elseif|while)(\s*\(\s*)('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)/',
-            '$1$2$3->submitted($4)',
-            $content
-        );
-        // negation: !$form->submit([$id])
-        $content = preg_replace(
-            '/(!\s*)('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)/',
-            '$1$2->submitted($3)',
-            $content
-        );
-        // boolean operator on the right: $form->submit([$id]) && / ||
-        $content = preg_replace(
-            '/('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)(\s*(?:&&|\|\|))/',
-            '$1->submitted($2)$3',
-            $content
-        );
-        // boolean operator on the left: && / || $form->submit([$id])
-        $content = preg_replace(
-            '/((?:&&|\|\|)\s*)('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)/',
-            '$1$2->submitted($3)',
-            $content
-        );
-        // ternary condition: $form->submit([$id]) ? ... (also short ternary),
-        // but not a PHP close tag or null coalescing
-        $content = preg_replace(
-            '/('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)(\s*\?(?![>?]))/',
-            '$1->submitted($2)$3',
-            $content
-        );
-        // return statement: return $form->submit([$id]);
-        $content = preg_replace(
-            '/(\breturn\s+)('.$recv.')->submit\s*\(\s*([^)]*?)\s*\)/',
-            '$1$2->submitted($3)',
-            $content
-        );
 
         // Apply method renames (scoped to Formr receivers). Renames run only on
         // real code — string literals, heredoc/nowdoc bodies, and comments are
