@@ -2,7 +2,7 @@
 
 All notable changes to `migrate` will be documented in this file
 
-## v1.0.1 - 2026-08-26
+## v1.0.1 - 2026-08-27
 
 Fidelity fixes from running v1.0.0 against five unrelated third-party
 projects. Four of six representative migrated forms fatalled on render
