@@ -215,6 +215,34 @@ function generateSimpleDiff(string $old, string $new): array
 $files = discoverPhpFiles($path);
 $migrator = new FormrMigrator;
 
+// Formr vendored by hand outside vendor/ is not the developer's code, and
+// nothing in it should be rewritten or annotated. Skipping only the file that
+// declares `class Formr` is not enough: its siblings (the wrapper traits, the
+// dropdown and forms helpers) call Formr's API on an instance they were
+// handed, so the external-usage gate would inject TODO comments into a
+// library the developer does not maintain.
+//
+// A first pass finds the directory holding the class declaration and treats
+// that whole subtree as library source. Cheap: only files already read for
+// the class check, and only when such a file exists at all.
+$libraryRoots = [];
+foreach ($files as $file) {
+    $content = @file_get_contents($file);
+    if ($content !== false && $migrator->definesFormrClass($content)) {
+        $libraryRoots[] = rtrim(dirname($file), DIRECTORY_SEPARATOR).DIRECTORY_SEPARATOR;
+    }
+}
+
+$isLibraryFile = static function (string $file) use ($libraryRoots): bool {
+    foreach ($libraryRoots as $root) {
+        if (str_starts_with($file, $root)) {
+            return true;
+        }
+    }
+
+    return false;
+};
+
 $totalStats = [
     'files_processed' => 0,
     'namespaces' => 0,
@@ -282,12 +310,13 @@ foreach ($files as $file) {
         $flagOnly = true;
     }
 
-    // A file that DEFINES the class is Formr itself, vendored by hand outside
-    // vendor/ (which the walk already skips). Migrating it rewrites
+    // Formr's own source, vendored by hand outside vendor/ (which the walk
+    // already skips). Migrating the class declaration rewrites
     // `namespace Formr` to `namespace Flick` and `class Formr` to
     // `class Flick`, destroying the library and colliding with the real
-    // package.
-    if ($migrator->definesFormrClass($originalContent)) {
+    // package; annotating its siblings puts TODO comments in a library the
+    // developer does not maintain.
+    if ($migrator->definesFormrClass($originalContent) || $isLibraryFile($file)) {
         $outcomes['skipped']++;
 
         continue;
