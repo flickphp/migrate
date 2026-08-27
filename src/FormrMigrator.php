@@ -986,6 +986,64 @@ class FormrMigrator
 
                 return "{$var}->{$method}({$name}, {$label}, {$value}, {$attrsStr})";
             }, $content);
+
+            // Fallback for everything the three literal patterns cannot match:
+            // any of arguments 1-7 being an expression rather than a string
+            // literal. Those calls fell through to the plain rename, so Flick
+            // received eight positional arguments and read the empty argument
+            // 4 as a dropdown loader name -- a hard throw, with the options
+            // array in argument 8 never reachable.
+            //
+            // Formr's $value (3) and $selected (7) both pre-select an option,
+            // so the Flick value is argument 3 when it carries something and
+            // argument 7 otherwise. Dropping argument 7 outright would lose
+            // the user's saved selection on exactly the shape that is most
+            // common: a literal '' for $value and an expression for $selected.
+            $content = $this->replaceBalancedCall($content, $method, function ($var, $args) use ($method, $receivers) {
+                if (! $receivers->matches($var) || count($args) < 5) {
+                    return null;
+                }
+
+                $args = array_map('trim', $args);
+                $isBlank = static fn (string $a): bool => $a === "''" || $a === '""' || $a === '';
+
+                $name = $args[0];
+                $label = $args[1] ?? "''";
+                $value = $args[2] ?? "''";
+                $id = $args[3] ?? "''";
+                $formrAttrs = $args[4] ?? "''";
+                $selected = $args[6] ?? "''";
+                $options = $args[7] ?? "''";
+
+                $effectiveValue = $isBlank($value) ? $selected : $value;
+                if ($isBlank($effectiveValue)) {
+                    $effectiveValue = "''";
+                }
+
+                // An id equal to the field name is what Flick emits anyway.
+                $idLiteral = $isBlank($id) ? '' : trim($id, '\'"');
+                $fieldName = trim($name, '\'"');
+                if ($idLiteral === $fieldName || $idLiteral === rtrim($fieldName, '[]')) {
+                    $idLiteral = '';
+                }
+
+                $attrPairs = [];
+                if (! $isBlank($options)) {
+                    $attrPairs[] = "'options' => ".$options;
+                }
+                if ($idLiteral !== '') {
+                    $attrPairs[] = "'id' => '".$idLiteral."'";
+                }
+                if (! $isBlank($formrAttrs)) {
+                    $attrPairs[] = "'attributes' => ".$formrAttrs;
+                }
+
+                $this->stats['methods']++;
+
+                $attrsStr = $attrPairs === [] ? '[]' : '['.implode(', ', $attrPairs).']';
+
+                return "{$var}->{$method}({$name}, {$label}, {$effectiveValue}, {$attrsStr})";
+            });
         }
 
         return $content;
