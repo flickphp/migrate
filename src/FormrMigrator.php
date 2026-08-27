@@ -370,6 +370,10 @@ class FormrMigrator
         // input_submit -> submit without touching the arguments, and the two
         // signatures put the button text in different slots.
         $content = $this->migrateSubmitMethods($content, $receivers);
+        // form_open()/open() need reshaping, not renaming: Formr and Flick
+        // both have open() and their argument orders are incompatible. Runs
+        // before migrateMethods so the map never renames form_open past it.
+        $content = $this->migrateFormrOpen($content, $receivers);
         $content = $this->migrateMethods($content, $receivers);
         // Checkbox/Radio migration must run AFTER migrateMethods (input_checkbox -> checkbox)
         $content = $this->migrateCheckboxRadioMethods($content, $receivers);
@@ -491,6 +495,104 @@ class FormrMigrator
      *
      * The 4th argument in Flick is an array that can contain 'id' and 'checked'.
      */
+    /**
+     * Reshape Formr's opening form tag into Flick's.
+     *
+     *   Formr: form_open($name, $id, $action, $method, $string, $hidden)
+     *   Formr: open(...)        -- same signature, an alias
+     *   Flick: open($action, $method, $attributes)
+     *
+     * The method map renames form_open to open but leaves the arguments
+     * alone, and a source that already said open() needs no rename at all --
+     * so either way Formr's action landed in Flick's attributes slot and the
+     * form rendered as
+     *
+     *   <form action="/" method="" id="myForm" index.php?q=admin>
+     *
+     * with the wrong target, an empty method (which browsers treat as GET)
+     * and the URL emitted as a bare attribute.
+     *
+     * form_open is Formr-only, so any argument count is unambiguously Formr's
+     * signature. A bare open() is ambiguous below four arguments, because
+     * Flick's own three-argument shape is already correct, so those are left
+     * untouched rather than guessed at.
+     *
+     * $name and $id have nowhere to go -- Flick takes the form id from
+     * constructor config -- so a non-default one is flagged rather than
+     * dropped in silence.
+     *
+     * Runs before migrateMethods() and renames form_open itself, so the
+     * method map never sees it.
+     */
+    private function migrateFormrOpen(string $content, Receivers $receivers): string
+    {
+        foreach (['form_open' => 1, 'open' => 4] as $method => $minArgs) {
+            $content = $this->replaceOutsideCommentsAndHeredocs(
+                $content,
+                fn (string $code) => $this->replaceBalancedCall($code, $method, function ($var, $args) use ($receivers, $minArgs) {
+                    if (! $receivers->matches($var) || count($args) < $minArgs) {
+                        return null;
+                    }
+
+                    $args = array_map('trim', $args);
+                    $isBlank = static fn (string $a): bool => $a === "''" || $a === '""' || $a === '';
+
+                    $name = $args[0] ?? "''";
+                    $id = $args[1] ?? "''";
+                    $action = $args[2] ?? "''";
+                    $formMethod = $args[3] ?? "''";
+                    $string = $args[4] ?? "''";
+
+                    // Build only as many arguments as carry meaning, padding
+                    // with Flick's own defaults when a later one is needed.
+                    $out = [];
+                    if (! $isBlank($action)) {
+                        $out[] = $action;
+                    }
+                    if (! $isBlank($formMethod)) {
+                        if ($out === []) {
+                            $out[] = "'/'";
+                        }
+                        $out[] = $formMethod;
+                    }
+                    if (! $isBlank($string)) {
+                        if ($out === []) {
+                            $out[] = "'/'";
+                        }
+                        if (count($out) < 2) {
+                            $out[] = "'POST'";
+                        }
+                        $out[] = $string;
+                    }
+
+                    $this->stats['methods']++;
+
+                    $call = $var.'->open('.implode(', ', $out).')';
+
+                    $lost = [];
+                    if (! $isBlank($name)) {
+                        $lost[] = 'name '.$name;
+                    }
+                    if (! $isBlank($id)) {
+                        $lost[] = 'id '.$id;
+                    }
+
+                    if ($lost === []) {
+                        return $call;
+                    }
+
+                    $note = 'open() '.implode(' and ', $lost)
+                        .' has no Flick equivalent: the form id comes from constructor config';
+                    $this->todos[] = $note;
+
+                    return '/* TODO: FLICK MIGRATION - '.$note.' */ '.$call;
+                })
+            );
+        }
+
+        return $content;
+    }
+
     private function migrateCheckboxRadioMethods(string $content, Receivers $receivers): string
     {
         $methods = ['checkbox', 'checkboxInline', 'radio', 'radioInline'];
